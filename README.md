@@ -11,7 +11,7 @@ For concurrency bugs and invariants that tests cannot reach, `/create-formal-ver
 
 ## Built for Claude Code
 
-This port translates upstream's Cursor skills for Claude Code before installation. [Upstream's Claude Code install](https://github.com/cursor/plugins/tree/c742dd6/harness/pstack/claude-code) asks agents to translate Cursor names at runtime, using extra tokens and relying on them to apply the mapping correctly. This port also adds a SessionStart hook that routes tasks to `poteto-mode`.
+This port translates upstream's Cursor skills for Claude Code before installation. [Upstream's Claude Code install](https://github.com/cursor/plugins/tree/2f87c85/harness/pstack/claude-code) asks agents to translate Cursor names at runtime, using extra tokens and relying on them to apply the mapping correctly. This port also adds a SessionStart hook that routes tasks to `poteto-mode`.
 
 ## Install
 
@@ -47,7 +47,7 @@ Invoke a skill by typing `$` and its name, such as `$poteto-mode` or `$babysit`,
 <details>
 <summary><strong>Pi</strong></summary>
 
-Run in your terminal:
+Run in your terminal, with Pi 1.5.1 or later:
 
 ```shell
 pi install git:github.com/michael-denyer/pstack-claude
