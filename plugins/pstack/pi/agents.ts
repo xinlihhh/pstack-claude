@@ -10,6 +10,7 @@ import { noticeOf, OUTPUT_CAP_BYTES, statusText, truncateUtf8 } from "./agent-te
 import type { AgentParams } from "./agent-tools.ts";
 import { type Activity, type AgentChild, alive, type ChildExit, PiChild, terminateGroup } from "./child.ts";
 import { HcChild } from "./hc-child.ts";
+import { T3Child, t3Session } from "./t3-child.ts";
 import { loadAgentTypes } from "./agent-files.ts";
 import { checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, InvalidValueError, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings } from "./config.ts";
 import { ensureWorktree, planWorktree, settleWorktree, type Worktree, worktreeSchema } from "./worktree.ts";
@@ -42,6 +43,7 @@ const identitySchema = Type.Object({
   systemPromptFile: Type.Optional(Type.String()),
   cwd: Type.String(),
   worktree: Type.Optional(worktreeSchema),
+  t3ThreadId: Type.Optional(Type.String()),
   startedAt: Type.String(),
 });
 const runningSchema = Type.Object({
@@ -133,6 +135,17 @@ function settle(worktree: Worktree): { kept: boolean; note: string } {
   } catch (e) {
     return { kept: true, note: `\n\n(worktree cleanup failed: ${(e as Error).message})` };
   }
+}
+
+// A T3 Code thread takes no launch flags, so its first message carries the agent file's body and the read-only rule.
+function briefFor(identity: AgentIdentity, prompt: string): string {
+  const body = identity.systemPromptFile ? readFileSync(identity.systemPromptFile, "utf8").trim() : "";
+  const parts = [
+    body && `<agent name="${identity.subagentType}">\n${body}\n</agent>`,
+    identity.readonly && "You are read-only: do not change any file, with the edit and write tools or with bash.",
+    prompt,
+  ];
+  return parts.filter(Boolean).join("\n\n");
 }
 
 function childArgs(identity: AgentIdentity, depth: number): string[] {
@@ -289,7 +302,14 @@ export class AgentRunner {
     const base = [...args, "--extension", join(this.settings.pluginRoot, "pi", "index.ts"), "--skill", join(this.settings.pluginRoot, "skills")];
     const flags = childArgs(identity, this.settings.depth);
     const env = { [PARENT_SESSION_ENV]: this.ownSessionId };
-    if (readSheet(this.settings.agentDir)?.hcHost && process.env.HC_TERMINAL_ID) {
+    const sheet = readSheet(this.settings.agentDir);
+    const t3 = t3Session();
+    if (identity.t3ThreadId || (sheet?.t3Host && t3 && !identity.worktree && !sessionFile(identity))) {
+      if (!t3) throw new Error(`Agent ${identity.id} runs in T3 Code thread ${identity.t3ThreadId}; message it from a Pi session inside T3 Code.`);
+      const launch = { title: identity.description, model: identity.model, thinking: identity.thinking, threadId: identity.t3ThreadId, onThread: (id: string) => (identity.t3ThreadId = id) };
+      return new T3Child(t3, launch, identity.t3ThreadId ? prompt : briefFor(identity, prompt));
+    }
+    if (sheet?.hcHost && process.env.HC_TERMINAL_ID) {
       const transcript = () => sessionFile(identity);
       return new HcChild(identity.id, command, [...base, ...flags], { cwd: identity.cwd, env: { ...env, PI_CODING_AGENT_DIR: this.settings.agentDir }, transcript }, prompt);
     }
