@@ -170,6 +170,42 @@ export function useWorld() {
   };
 }
 
+export const t3Reply = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
+
+export function useFakeT3() {
+  let server;
+  const saved = { T3_MCP_URL: process.env.T3_MCP_URL, T3_MCP_BEARER_TOKEN: process.env.T3_MCP_BEARER_TOKEN };
+  afterEach(() => {
+    server?.stop(true);
+    server = undefined;
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  return (tools) => {
+    const calls = [];
+    server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const message = await request.json();
+        if (message.id === undefined) return new Response(null, { status: 202 });
+        if (message.method === "initialize") {
+          return Response.json({ jsonrpc: "2.0", id: message.id, result: {} }, { headers: { "mcp-session-id": "s1" } });
+        }
+        const { name, arguments: args } = message.params;
+        calls.push({ name, args, session: request.headers.get("mcp-session-id"), auth: request.headers.get("authorization") });
+        const result = await tools[name](args, calls);
+        return new Response(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n\n`, { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const session = { endpoint: `http://127.0.0.1:${server.port}/mcp`, token: "tok" };
+    process.env.T3_MCP_URL = session.endpoint;
+    process.env.T3_MCP_BEARER_TOKEN = session.token;
+    return { session, calls };
+  };
+}
+
 // A second extension instance over the same world, as after a reload or resume.
 export async function restore(w, entries, reason = "resume", ctx = {}) {
   const pi = fakePi();

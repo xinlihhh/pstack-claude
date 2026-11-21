@@ -5,9 +5,10 @@ import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
 import { join } from "node:path";
 
-import { agentEntry, alive, flag, listAgents, recordWith, restore, sleep, useWorld, waitFor } from "./harness.mjs";
+import { agentEntry, alive, flag, listAgents, recordWith, restore, sleep, t3Reply, useFakeT3, useWorld, waitFor } from "./harness.mjs";
 
 const setup = useWorld();
+const fakeT3 = useFakeT3();
 
 const exitOf = (proc) => new Promise((r) => proc.on("exit", r));
 
@@ -269,6 +270,28 @@ describe("registry", () => {
     const resumed = await restore(w, asHc(gone.pid));
     await waitFor(() => !alive(program));
     expect((await listAgents(resumed, ctx))[0].status).toBe("stopped");
+  });
+
+  test("a restored T3 Code agent is left to its live launching pi, and once that pi is gone its task is cancelled and it reads as stopped", async () => {
+    const { calls } = fakeT3({
+      task_cancel: () => t3Reply({ taskId: "task-1", status: "cancel_requested" }),
+      t3_thread_wait: () => t3Reply({ status: "interrupted", timedOut: false }),
+    });
+    const { w, pi, ctx } = setup();
+    await pi.call("agent", { description: "in t3", prompt: "x" }, ctx);
+    const launcher = w.spawn("sleep", ["30"], { detached: true });
+    const gone = w.spawn("sleep", ["0.1"]);
+    await exitOf(gone);
+    const asT3 = (parentPid) => [agentEntry(recordWith(pi.entries.at(0).data, { agent: { t3ThreadId: "thread-1" }, status: "running", host: "t3", t3TaskId: "task-1", parentPid }))];
+
+    const kept = await restore(w, asT3(launcher.pid));
+    expect((await listAgents(kept, ctx))[0].status).toBe("running");
+    expect(calls).toEqual([]);
+
+    const resumed = await restore(w, asT3(gone.pid));
+    await waitFor(() => calls.some((c) => c.name === "t3_thread_wait"));
+    expect(calls.map((c) => [c.name, c.args.taskId ?? c.args.threadId])).toEqual([["task_cancel", "task-1"], ["t3_thread_wait", "thread-1"]]);
+    await waitFor(async () => (await listAgents(resumed, ctx))[0].status === "stopped");
   });
 
   test("send_message and stop_agent refuse an agent another live pi process is running, naming that process", async () => {

@@ -10,7 +10,7 @@ import { noticeOf, OUTPUT_CAP_BYTES, statusText, truncateUtf8 } from "./agent-te
 import type { AgentParams } from "./agent-tools.ts";
 import { type Activity, type AgentChild, alive, type ChildExit, PiChild, terminateGroup } from "./child.ts";
 import { HcChild } from "./hc-child.ts";
-import { T3Child, t3Session } from "./t3-child.ts";
+import { cancelTask, T3Child, t3Session } from "./t3-child.ts";
 import { loadAgentTypes } from "./agent-files.ts";
 import { checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, InvalidValueError, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings } from "./config.ts";
 import { ensureWorktree, planWorktree, settleWorktree, type Worktree, worktreeSchema } from "./worktree.ts";
@@ -56,7 +56,8 @@ const runningSchema = Type.Object({
   pidStart: Type.Optional(Type.String()),
   // The pi process that launched it. Only that process may reap it.
   parentPid: Type.Number(),
-  host: Type.Optional(Type.Literal("hc")),
+  host: Type.Optional(Type.Union([Type.Literal("hc"), Type.Literal("t3")])),
+  t3TaskId: Type.Optional(Type.String()),
 });
 const endedSchema = Type.Object({
   agent: identitySchema,
@@ -194,6 +195,7 @@ type Fate = "kept" | "orphan" | "unknown" | "gone";
 
 function fateOf(record: RunningRecord): Fate {
   const { pid, pidStart, parentPid } = record;
+  if (record.host === "t3") return record.t3TaskId === undefined ? "gone" : parentPid !== process.pid && alive(parentPid) ? "kept" : "orphan";
   if (pid === undefined || !alive(pid)) return "gone";
   const info = inspect(pid);
   if (info && pidStart !== undefined && info.start !== pidStart) return "gone";
@@ -208,6 +210,11 @@ function fateOf(record: RunningRecord): Fate {
 // Stops an orphan, by its group so the bash command it has running goes too.
 // No other fate is signalled: a pid that may have been reused is not ours to hit.
 function reapOrphan(record: RunningRecord, killGraceMs: number): Promise<void> {
+  if (record.host === "t3") {
+    const session = t3Session();
+    const { t3TaskId: taskId, agent } = record;
+    return session && taskId && agent.t3ThreadId ? cancelTask(session, taskId, agent.t3ThreadId).catch(() => undefined) : Promise.resolve();
+  }
   return record.pid === undefined ? Promise.resolve() : terminateGroup(record.pid, () => fateOf(record) === "orphan", killGraceMs);
 }
 
@@ -309,7 +316,11 @@ export class AgentRunner {
     const t3 = t3Session();
     if (identity.t3ThreadId || (sheet?.t3Host && t3 && !identity.worktree && !sessionFile(identity))) {
       if (!t3) throw new Error(`Agent ${identity.id} runs in T3 Code thread ${identity.t3ThreadId}; message it from a Pi session inside T3 Code.`);
-      const launch = { title: identity.description, model: identity.model, thinking: identity.thinking, threadId: identity.t3ThreadId, onThread: (id: string) => (identity.t3ThreadId = id) };
+      const onStart = ({ threadId, taskId }: { threadId: string; taskId: string }) => {
+        identity.t3ThreadId = threadId;
+        this.track(identity.id, { host: "t3", t3TaskId: taskId });
+      };
+      const launch = { title: identity.description, model: identity.model, thinking: identity.thinking, threadId: identity.t3ThreadId, onStart };
       return new T3Child(t3, launch, identity.t3ThreadId ? prompt : briefFor(identity, prompt));
     }
     if (sheet?.hcHost && process.env.HC_TERMINAL_ID) {
@@ -326,7 +337,7 @@ export class AgentRunner {
     return new PiChild(command, [...base, "--mode", "rpc", ...flags], { cwd: identity.cwd, env, exitGraceMs: this.settings.exitGraceMs, onActivity: () => this.showStatus() }, prompt);
   }
 
-  private track(id: string, handle: Pick<RunningRecord, "host" | "pid" | "pidStart">): void {
+  private track(id: string, handle: Partial<Pick<RunningRecord, "host" | "pid" | "pidStart" | "t3TaskId">>): void {
     const state = this.agents.get(id);
     if (state?.kind !== "local") return;
     Object.assign(state.record, handle);
@@ -496,7 +507,8 @@ export class AgentRunner {
       if (restored.kind === "interrupted") {
         void reapOrphan(record, this.settings.killGraceMs).then(() => {
           if (this.agents.get(record.agent.id) === restored) {
-            this.agents.set(record.agent.id, { kind: "unverified", record });
+            // A cancelled T3 Code task leaves nothing to check, so the next refresh reads it as gone.
+            this.agents.set(record.agent.id, { kind: "unverified", record: record.host === "t3" ? { ...record, t3TaskId: undefined } : record });
           }
         });
       }

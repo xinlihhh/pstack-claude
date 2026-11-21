@@ -32,7 +32,7 @@ export interface T3Launch {
   model?: string;
   thinking?: string;
   threadId?: string;
-  onThread: (threadId: string) => void;
+  onStart: (task: { threadId: string; taskId: string }) => void;
 }
 
 export class T3Child {
@@ -71,9 +71,9 @@ export class T3Child {
 
   private async drive(launch: T3Launch, prompt: string): Promise<ChildExit> {
     try {
-      const runId = await this.start(launch, prompt);
+      const { threadId, runId } = await this.start(launch, prompt);
       if (this.ending) await this.cancel();
-      await this.wait(runId);
+      await settled(this.mcp, threadId, runId);
       const { status, summary } = await this.mcp.call(taskResult, "task_status", { taskId: this.taskId });
       this.settled = status === "completed";
       const text = summary ?? "";
@@ -84,31 +84,38 @@ export class T3Child {
     }
   }
 
-  private async start(launch: T3Launch, prompt: string): Promise<string> {
+  private async start(launch: T3Launch, prompt: string): Promise<{ threadId: string; runId: string }> {
     if (launch.threadId !== undefined) {
       this.threadId = launch.threadId;
       const { taskId, runId } = await this.mcp.call(sent, "t3_thread_send", { threadId: launch.threadId, message: prompt, mode: "auto" });
       this.taskId = taskId;
-      return runId;
+      if (taskId !== undefined) launch.onStart({ threadId: launch.threadId, taskId });
+      return { threadId: launch.threadId, runId };
     }
     const target = { ...(launch.model && { model: launch.model }), ...(launch.thinking && { options: { thinking: launch.thinking } }) };
     const task = await this.mcp.call(delegated, "delegate_task", { task: prompt, title: launch.title, target, mode: "async" });
     this.threadId = task.childThreadId;
     this.taskId = task.taskId;
-    launch.onThread(task.childThreadId);
-    return task.childRunId;
-  }
-
-  private async wait(runId: string): Promise<void> {
-    for (;;) {
-      const { timedOut } = await this.mcp.call(waited, "t3_thread_wait", { threadId: this.threadId, runId, timeoutMs: WAIT_MS, untilDelegatedWorkSettled: true });
-      if (!timedOut) return;
-    }
+    launch.onStart({ threadId: task.childThreadId, taskId: task.taskId });
+    return { threadId: task.childThreadId, runId: task.childRunId };
   }
 
   private async cancel(): Promise<void> {
     if (this.taskId === undefined) return;
     await this.mcp.call(Type.Unknown(), "task_cancel", { taskId: this.taskId, reason: "stop_agent" }).catch(() => undefined);
+  }
+}
+
+export async function cancelTask(session: T3Session, taskId: string, threadId: string): Promise<void> {
+  const mcp = new T3Mcp(session);
+  await mcp.call(Type.Unknown(), "task_cancel", { taskId, reason: "its pi session ended" });
+  await settled(mcp, threadId);
+}
+
+async function settled(mcp: T3Mcp, threadId: string, runId?: string): Promise<void> {
+  for (;;) {
+    const { timedOut } = await mcp.call(waited, "t3_thread_wait", { threadId, ...(runId && { runId }), timeoutMs: WAIT_MS, untilDelegatedWorkSettled: true });
+    if (!timedOut) return;
   }
 }
 
