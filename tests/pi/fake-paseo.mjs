@@ -84,7 +84,6 @@ if (command === "run") {
   if (script.sendMs) await Bun.sleep(script.sendMs);
   if (script.sendError) fail(script.sendError, "the daemon said no");
   const cursorFile = join(dirOf(id), "cursor.json");
-  // The archive ended the turn the agent was in.
   if (existsSync(archivedFile(id)) && existsSync(cursorFile)) writeFileSync(cursorFile, JSON.stringify({ ...JSON.parse(readFileSync(cursorFile, "utf8")), steps: [] }));
   rmSync(archivedFile(id), { force: true });
   deliver(id);

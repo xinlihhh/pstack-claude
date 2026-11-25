@@ -29,7 +29,7 @@ function registerPaseoChild(pi: ExtensionAPI, settings: Settings, handoff: Pstac
     if (options.forceSystemPrompt !== undefined) return { systemPrompt: `${event.systemPrompt}\n\n${added}` };
     options.appendSystemPrompt = [options.appendSystemPrompt, added].filter(Boolean).join("\n\n");
   });
-  // Also for a call made from a script, which the active tool list does not cover for every tool.
+  // setActiveTools does not stop a codemode script from calling a tool, so the call is blocked here as well.
   pi.on("tool_call", (event) => (withheld().includes(event.toolName) ? { block: true, reason: `This agent has no ${event.toolName} tool.` } : undefined));
 }
 

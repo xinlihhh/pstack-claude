@@ -31,7 +31,6 @@ export interface Settings {
   pi: { command: string; args: string[] };
   // Layers below the main session: 0 there, 1 in its agents, and so on.
   readonly depth: number;
-  // The Paseo agent this session runs as, if any.
   readonly paseoAgent?: string;
   killGraceMs: number;
   // How long a settled child gets to exit after its stdin closes. It covers a

@@ -39,7 +39,6 @@ afterEach(async () => {
 });
 const setup = useWorld();
 
-// The fake on PATH, playing `script`, with its state in a folder of its own.
 function fakePaseo(script) {
   const dir = scratchDir("pstack-fake-paseo-");
   mkdirSync(join(dir, "bin"));
@@ -134,7 +133,6 @@ describe("the paseo host", () => {
     const { start, calls, pi, ctx, last } = paseo({ script });
     const id = await start("slow");
     await waitFor(() => calls("wait").length === 1);
-    // The transcript can be followed while the first turn still runs.
     await waitFor(async () => (await listAgents(pi, ctx))[0].sessionFile !== undefined);
     expect(resultText(await pi.call("send_message", { to: id, message: "go left" }, ctx))).toContain("is running");
     await waitFor(() => pi.messages.length === 1);

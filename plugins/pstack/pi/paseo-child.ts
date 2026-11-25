@@ -121,7 +121,7 @@ export class PaseoChild {
   private phase: Phase = "running";
   private agentId?: string;
   private next: number;
-  // The highest message Paseo has taken.
+  // The highest message sent. settle() reads it only once every send has settled.
   private last: number;
   private readonly from: number;
   // The start and every send, in order. It never rejects.
@@ -293,7 +293,7 @@ export function paseoFate(agentId: string | undefined, launcher: number): "kept"
   return Value.Check(cliError, answer) && answer.error.code === "AGENT_NOT_FOUND" ? "gone" : "unknown";
 }
 
-// Best effort: an agent already archived or deleted needs nothing more.
+// Never rejects: a stop or a teardown goes on whatever the daemon answers.
 export function archivePaseoAgent(agentId: string): Promise<void> {
   return execPaseo("paseo", ["archive", "--json", "--force", agentId], { timeout: CLI_TIMEOUT_MS }).then(
     () => undefined,
