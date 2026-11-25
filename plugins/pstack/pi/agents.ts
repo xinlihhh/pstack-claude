@@ -11,14 +11,11 @@ import type { AgentParams } from "./agent-tools.ts";
 import { type Activity, type AgentChild, alive, type ChildExit, PiChild, terminateGroup } from "./child.ts";
 import { HcChild } from "./hc-child.ts";
 import { loadAgentTypes } from "./agent-files.ts";
-import { checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, InvalidValueError, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings } from "./config.ts";
+import { activeAgentTag, checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, InvalidValueError, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings, withheldTools } from "./config.ts";
 import { ensureWorktree, planWorktree, settleWorktree, type Worktree, worktreeSchema } from "./worktree.ts";
 
 const ENTRY_TYPE = "pstack-agents";
 const STATUS_KEY = "pstack-agents";
-// Claude Code lets agents nest three layers below the main session and withholds
-// the Agent tool at the third.
-const MAX_SPAWN_DEPTH = 3;
 // Names the session a child's permission asks go to. @gotgenes/pi-permission-system
 // relays them there while that session has a UI; without it a child answers them itself.
 const PARENT_SESSION_ENV = "PI_SUBAGENT_PARENT_SESSION";
@@ -141,12 +138,9 @@ function childArgs(identity: AgentIdentity, depth: number): string[] {
   if (identity.model) args.push("--model", identity.model);
   if (identity.thinking) args.push("--thinking", identity.thinking);
   if (identity.systemPromptFile) args.push("--append-system-prompt", identity.systemPromptFile);
-  // @gotgenes/pi-permission-system 42.0.0 names a forwarded ask's agent from this tag in the child's
-  // system prompt, and picks its per-agent permission policy by that name; without it the parent's
-  // dialog says "unknown".
-  args.push("--append-system-prompt", `<active_agent name="${identity.subagentType}" />`);
+  args.push("--append-system-prompt", activeAgentTag(identity.subagentType));
   args.push(`--${DEPTH_FLAG}`, String(depth + 1));
-  const excluded = [...(identity.readonly ? ["edit", "write"] : []), ...(depth + 1 >= MAX_SPAWN_DEPTH ? ["agent"] : [])];
+  const excluded = withheldTools(identity.readonly, depth + 1);
   if (excluded.length) args.push("--exclude-tools", excluded.join(","));
   return args;
 }

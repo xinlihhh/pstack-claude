@@ -11,6 +11,9 @@ const PARENT_MODEL_ALIASES = ["inherit-parent", "auto"];
 
 // A parent passes it to each agent it starts, so the agent knows its depth.
 export const DEPTH_FLAG = "pstack-depth";
+// Claude Code lets agents nest three layers below the main session and withholds
+// the Agent tool at the third.
+export const MAX_SPAWN_DEPTH = 3;
 // Under agentDir, holds each session's agent sessions and prompts. The worktree
 // audit scans it by this name, so a rename must reach that script too.
 export const PSTACK_STATE_DIR = "pstack";
@@ -59,6 +62,16 @@ export function defaultSettings(readDepth: () => number, agentDir = process.env.
     exitGraceMs: 30_000,
   };
 }
+
+export const withheldTools = (readonly: true | undefined, depth: number): string[] => [
+  ...(readonly ? ["edit", "write"] : []),
+  ...(depth >= MAX_SPAWN_DEPTH ? ["agent"] : []),
+];
+
+// @gotgenes/pi-permission-system 42.0.0 names a forwarded ask's agent from this tag in the child's
+// system prompt, and picks its per-agent permission policy by that name; without it the parent's
+// dialog says "unknown".
+export const activeAgentTag = (subagentType: string) => `<active_agent name="${subagentType}" />`;
 
 interface Sheet {
   text: string;
