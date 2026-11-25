@@ -18,7 +18,10 @@ const write = (role, text, extra, id) => append({ type: "message", id, message: 
 
 const files = readdirSync(flag("--session-dir")).filter((name) => !name.endsWith(".jsonl"));
 log({ argv, prompt, files, cwd: process.cwd(), env: { PSTACK_PROBE: process.env.PSTACK_PROBE, ORCA_PANE_KEY: process.env.ORCA_PANE_KEY, ORCA_PI_STATUS_OWNED: process.env.ORCA_PI_STATUS_OWNED } });
-if (script.exit !== undefined) process.exit(script.exit);
+if (script.exit !== undefined) {
+  if (script.stderr) process.stderr.write(script.stderr);
+  process.exit(script.exit);
+}
 
 write("user", prompt);
 if (script.hang) {

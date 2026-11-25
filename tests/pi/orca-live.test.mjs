@@ -11,6 +11,7 @@ import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 import { sessionFile } from "../../plugins/pstack/pi/agents.ts";
 import { alive } from "../../plugins/pstack/pi/child.ts";
@@ -21,6 +22,7 @@ const LIVE = process.env.PSTACK_PI_ORCA_LIVE === "1";
 const MODEL = process.env.PSTACK_PI_ORCA_MODEL ?? "magpie/claude/claude-haiku-5-5";
 const ORCA_IDE = process.env.ORCA_IDE ?? join(homedir(), ".local", "bin", "orca-ide");
 const USER_AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+const EXTENSION = fileURLToPath(new URL("../../plugins/pstack/pi/index.ts", import.meta.url));
 const MINUTE = 60_000;
 const GRACE = 5_000;
 const suite = LIVE ? describe : describe.skip;
@@ -170,15 +172,15 @@ suite("the orca host on a live Orca runtime", () => {
   );
 
   test(
-    "a prompt that starts with a dash or an @, with quotes, $, and backticks across lines, reaches the child as written",
+    "a prompt that starts with a dash, with quotes, $, backticks, and trailing newlines, reaches the child as written, and one that starts with an @ gains one leading space",
     async () => {
       for (const lead of ["--help is not a flag.", "@a.txt is not a file argument."]) {
-        const prompt = `${lead} Quote test: "dq" 'sq' & <b> $HOME \`id\`\nSecond line. Reply with the word verbatim, and nothing else.`;
+        const prompt = `${lead} Quote test: "dq" 'sq' & <b> $HOME \`id\`\nSecond line. Reply with the word verbatim, and nothing else.\n\n`;
         const { child, identity } = launch(prompt);
         const exit = await child.exited;
         expect(exit.settled).toBe(true);
         expect(exit.finalText.toLowerCase()).toContain("verbatim");
-        expect(userTexts(identity)[0].message.content[0].text.trim()).toBe(prompt);
+        expect(userTexts(identity)[0].message.content[0].text).toBe(lead.startsWith("@") ? ` ${prompt}` : prompt);
       }
     },
     5 * MINUTE,
@@ -238,10 +240,11 @@ suite("the orca host on a live Orca runtime", () => {
   );
 
   test(
-    "Escape typed into the tab during a tool call ends the run as stopped in Orca",
+    "Escape typed into the tab during a tool call, with a steer still queued, ends the run as stopped in Orca",
     async () => {
       const { child, identity } = launch("Run `sleep 30` with bash and wait for it, then reply with the word done.");
       expect(await toolStarted(identity)).toBe(true);
+      expect((await child.steer("When the sleep ends, reply with the word kiwi instead.")).taken).toBe(true);
       const tab = terminals()[0].handle;
       orca("terminal", "send", `--terminal=${tab}`, "--text=\u001b");
       const exit = await child.exited;
@@ -261,6 +264,45 @@ suite("the orca host on a live Orca runtime", () => {
       expect(exit.settled).toBe(true);
       expect(exit.finalText.toLowerCase()).toContain("marmalade");
       expect(readdirSync(first.identity.sessionDir).filter((n) => n.endsWith(`_${first.identity.sessionId}.jsonl`)).length).toBe(1);
+    },
+    5 * MINUTE,
+  );
+
+  test(
+    "a child that starts a background agent of its own settles on the reply it gives once that agent is done",
+    async () => {
+      const prompt = `Call the agent tool once with run_in_background true, model "${MODEL}", description "sleeper", and prompt "Run \`sleep 20\` with bash, then reply with the word pineapple." Then reply with the word waiting. When the agent's result arrives, reply with the word it gave, and nothing else.`;
+      const { child } = launch(prompt, { args: ["--extension", EXTENSION, "--pstack-depth", "1"] });
+      const exit = await child.exited;
+      expect(exit.settled).toBe(true);
+      expect(exit.finalText.toLowerCase()).toContain("pineapple");
+    },
+    5 * MINUTE,
+  );
+
+  test(
+    "end stops the child's own background agent and the command it runs",
+    async () => {
+      const marker = `sleep ${4000 + Math.floor(Math.random() * 999)}`;
+      const prompt = `Call the agent tool once with run_in_background true, model "${MODEL}", description "sleeper", and prompt "Run \`${marker}\` with bash and wait for it to finish." Then run \`sleep 120\` with bash and wait for it.`;
+      const { child } = launch(prompt, { args: ["--extension", EXTENSION, "--pstack-depth", "1"] });
+      const running = () => spawnSync("pgrep", ["-f", `^${marker}$`]).status === 0;
+      expect(await until(running, 2 * MINUTE)).toBe(true);
+      child.end(GRACE);
+      await child.exited;
+      expect(await until(() => !running(), GRACE + 15_000)).toBe(true);
+      expect(await until(() => terminals().length === 0, 10_000)).toBe(true);
+    },
+    5 * MINUTE,
+  );
+
+  test(
+    "a pi that fails to start fails the run with its error",
+    async () => {
+      const { child } = launch("Reply with the word never.", { args: ["--model", "nope/no-such-model"] });
+      const exit = await child.exited;
+      expect(exit.settled).toBe(false);
+      expect(exit.stderr).toContain("no-such-model");
     },
     5 * MINUTE,
   );

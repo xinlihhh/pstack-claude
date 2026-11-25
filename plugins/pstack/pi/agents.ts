@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-wor
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 
-import { noticeOf, OUTPUT_CAP_BYTES, statusText, truncateUtf8 } from "./agent-text.ts";
+import { AGENTS_ENTRY, noticeOf, OUTPUT_CAP_BYTES, statusText, truncateUtf8 } from "./agent-text.ts";
 import type { AgentParams } from "./agent-tools.ts";
 import { type Activity, type AgentChild, alive, type ChildExit, PiChild, terminateGroup } from "./child.ts";
 import { HcChild, pidOfTerminal } from "./hc-child.ts";
@@ -17,7 +17,6 @@ import { loadAgentTypes } from "./agent-files.ts";
 import { activeAgentTag, checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, HANDOFF_ENV, InvalidValueError, type PstackHandoff, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings, withheldTools } from "./config.ts";
 import { ensureWorktree, planWorktree, settleWorktree, type Worktree, worktreeSchema } from "./worktree.ts";
 
-const ENTRY_TYPE = "pstack-agents";
 const STATUS_KEY = "pstack-agents";
 // Names the session a child's permission asks go to. @gotgenes/pi-permission-system
 // relays them there while that session has a UI; without it a child answers them itself.
@@ -552,7 +551,7 @@ export class AgentRunner {
   }
 
   private persist(record: AgentRecord): void {
-    this.pi.appendEntry(ENTRY_TYPE, record);
+    this.pi.appendEntry(AGENTS_ENTRY, record);
   }
 
   private refreshRestored(state: AgentState): AgentState {
@@ -594,7 +593,7 @@ export class AgentRunner {
   // process whose identity matches the record can be signalled.
   restore(entries: readonly SessionEntry[]): void {
     for (const entry of entries) {
-      if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE || !Value.Check(recordSchema, entry.data)) continue;
+      if (entry.type !== "custom" || entry.customType !== AGENTS_ENTRY || !Value.Check(recordSchema, entry.data)) continue;
       const { id } = entry.data.agent;
       if (this.agents.get(id)?.kind === "local") continue;
       this.agents.set(id, entry.data.status === "running" ? { kind: "remote", record: entry.data } : { kind: "ended", record: entry.data });

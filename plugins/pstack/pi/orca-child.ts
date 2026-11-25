@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
+import { AGENTS_ENTRY, NOTICE_TYPE } from "./agent-text.ts";
 import { alive, type ChildExit, signalGroup, terminateGroup } from "./child.ts";
 import { envScript, jsonLines, replyOf, sizeOf } from "./hc-child.ts";
 
@@ -22,6 +23,8 @@ const messageEntry = Type.Object({
   message: Type.Object({ role: Type.String(), stopReason: Type.Optional(Type.String()) }),
 });
 const droppedEntry = Type.Object({ type: Type.Literal("context_edit"), targetId: Type.String(), replacement: Type.Null() });
+const agentEntry = Type.Object({ type: Type.Literal("custom"), customType: Type.Literal(AGENTS_ENTRY), data: Type.Object({ agent: Type.Object({ id: Type.String() }), status: Type.String() }) });
+const noticeEntry = Type.Object({ type: Type.Literal("custom_message"), customType: Type.Literal(NOTICE_TYPE), details: Type.Object({ status: Type.String() }) });
 
 export interface OrcaSession {
   cli: string;
@@ -34,14 +37,18 @@ export function orcaSession(env: NodeJS.ProcessEnv = process.env): OrcaSession |
 }
 
 export function settledRun(entries: unknown[], steers: number): Pick<ChildExit, "interruption"> | undefined {
-  const messages = entries.filter((entry) => Value.Check(messageEntry, entry));
-  const last = messages.at(-1);
-  // Counted, not matched by text: a TUI may reshape pasted text.
-  const users = messages.filter(({ message }) => message.role === "user").length;
-  if (users < 1 + steers || last?.message.role !== "assistant" || last.message.stopReason === "toolUse") return undefined;
+  // The notice of one of the child's own agents that was not stopped starts a turn there.
+  const last = entries.filter((entry) => Value.Check(messageEntry, entry) || (Value.Check(noticeEntry, entry) && entry.details.status !== "stopped")).at(-1);
+  if (!Value.Check(messageEntry, last) || last.message.role !== "assistant" || last.message.stopReason === "toolUse") return undefined;
   // Pi drops a failed reply it is about to retry with a context edit.
   if (entries.some((entry) => Value.Check(droppedEntry, entry) && entry.targetId === last.id)) return undefined;
-  return { interruption: last.message.stopReason === "aborted" ? "stopped in Orca" : undefined };
+  // Pi puts a steer still queued at an abort back in its editor, so it never arrives.
+  if (last.message.stopReason === "aborted") return { interruption: "stopped in Orca" };
+  // Counted, not matched by text: a TUI may reshape pasted text.
+  const users = entries.filter((entry) => Value.Check(messageEntry, entry) && entry.message.role === "user").length;
+  if (users < 1 + steers) return undefined;
+  const agents = new Map(entries.filter((entry) => Value.Check(agentEntry, entry)).map(({ data }) => [data.agent.id, data.status]));
+  return [...agents.values()].includes("running") ? undefined : { interruption: undefined };
 }
 
 export interface OrcaOptions {
@@ -68,16 +75,19 @@ export class OrcaChild {
 
   constructor(command: string, args: string[], opts: OrcaOptions, prompt: string) {
     this.cli = opts.session.cli;
-    const files = { env: `${opts.files}.env`, prompt: `${opts.files}.prompt`, script: `${opts.files}.sh` };
+    const files = { env: `${opts.files}.env`, prompt: `${opts.files}.prompt`, script: `${opts.files}.sh`, err: `${opts.files}.err` };
     writeFileSync(files.env, envScript({ ...process.env, ...opts.env }, "ORCA_"), { mode: 0o600 });
     // Pi reads an argument that starts with @ as a file, even after --.
     writeFileSync(files.prompt, prompt.startsWith("@") ? ` ${prompt}` : prompt, { mode: 0o600 });
-    const launch = `. ${quote(files.env)} && rm -- ${quote(files.env)} && p=$(cat ${quote(files.prompt)}) && rm -- ${quote(files.prompt)} && cd ${quote(opts.cwd)} && exec ${[command, ...args].map(quote).join(" ")} -- "$p"\n`;
+    const launch = `. ${quote(files.env)} && rm -- ${quote(files.env)} && p=$(cat ${quote(files.prompt)}; printf x) && p=\${p%x} && rm -- ${quote(files.prompt)} && cd ${quote(opts.cwd)} && exec ${[command, ...args].map(quote).join(" ")} -- "$p" 2>>${quote(files.err)}\n`;
     writeFileSync(files.script, launch, { mode: 0o600 });
     this.exited = this.drive(files, opts);
   }
 
-  async steer(message: string): Promise<{ response: { success: boolean } | undefined; taken: boolean }> {
+  async steer(message: string): Promise<{ response: { success: boolean; error?: string } | undefined; taken: boolean }> {
+    if (/^\s*[!/]/.test(message)) {
+      return { response: { success: false, error: "the message starts with ! or /, which pi's editor in the Orca tab would run as a shell or slash command; reword it" }, taken: false };
+    }
     if (!this.settled && this.handle !== undefined) {
       // Counted before the send, so the run cannot settle while the message is on its way.
       this.steers++;
@@ -123,7 +133,7 @@ export class OrcaChild {
       }
       this.settled = run !== undefined;
       const entries = written();
-      const stderr = this.settled || this.ending ? "" : await this.screen();
+      const stderr = this.settled || this.ending ? "" : readText(files.err) || (await this.screen());
       await this.close(opts.graceMs);
       return { exitCode: null, settled: this.settled, ...replyOf(entries), interruption: run?.interruption, stderr };
     } catch (e) {
@@ -162,6 +172,14 @@ export class OrcaChild {
     const answer: unknown = JSON.parse(stdout);
     if (!Value.Check(schema, answer)) throw new Error(`orca ${args[0]} ${args[1]} answered: ${stdout.trim().slice(0, 300)}`);
     return answer;
+  }
+}
+
+function readText(file: string): string {
+  try {
+    return readFileSync(file, "utf8");
+  } catch {
+    return "";
   }
 }
 

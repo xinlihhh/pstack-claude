@@ -84,7 +84,7 @@ describe("OrcaChild", () => {
     const [pi] = run.pi();
     expect(run.started).toEqual([pi.pid]);
     expect(pi.cwd).toBe(run.cwd);
-    expect(pi.files).toEqual(["a1.sh"]);
+    expect(pi.files.toSorted()).toEqual(["a1.err", "a1.sh"]);
     expect(pi.env).toEqual({ PSTACK_PROBE: "it's $HOME", ORCA_PANE_KEY: "child-pane" });
     expect(alive(pi.pid)).toBe(false);
     expect(run.calls("close")).toEqual([["terminal", "close", "--terminal=term_child", "--json"]]);
@@ -93,7 +93,7 @@ describe("OrcaChild", () => {
   });
 
   test("the launch script passes the prompt and every argument through sh verbatim", async () => {
-    const prompt = "-x is no flag: \"double\" 'single' $HOME `id` $(id) \\ end\nnext line *";
+    const prompt = "-x is no flag: \"double\" 'single' $HOME `id` $(id) \\ end\nnext line *\n\n";
     const args = ["--append-system-prompt", "<active_agent name=\"a's\" />", "$HOME", "two words"];
     const run = launch(prompt, { args, cwdName: "it's a $dir" });
     expect((await run.child.exited).settled).toBe(true);
@@ -118,6 +118,20 @@ describe("OrcaChild", () => {
     expect(await run.child.steer("too late")).toEqual({ response: undefined, taken: false });
     expect(run.calls("send")).toHaveLength(1);
   }, 15_000);
+
+  test("a steer that pi's editor would run as a shell or slash command is refused, not typed", async () => {
+    const run = launch("start", { script: { hang: true } });
+    await waitFor(() => run.started.length === 1 && run.pi().length === 2);
+    for (const message of ["!rm -rf x", "  /quit", "\n!!ls"]) {
+      const answer = await run.child.steer(message);
+      expect(answer.taken).toBe(false);
+      expect(answer.response).toMatchObject({ success: false });
+      expect(answer.response.error).toContain("starts with ! or /");
+    }
+    expect(run.calls("send")).toEqual([]);
+    run.child.end(GRACE);
+    await run.child.exited;
+  });
 
   test("a steer Orca does not take is not waited for", async () => {
     const run = launch("start", { script: { hang: true, fail: { "terminal send": "no pane" } } });
@@ -159,7 +173,13 @@ describe("OrcaChild", () => {
     expect(await run.child.exited).toMatchObject({ settled: true, interruption: "stopped in Orca" });
   });
 
-  test("a pi that exits before replying fails the run with the terminal's screen", async () => {
+  test("a pi that exits before replying fails the run with what it wrote to stderr", async () => {
+    const run = launch("x", { script: { exit: 1, stderr: "Error: Model \"nope/x\" not found.\n" } });
+    expect(await run.child.exited).toMatchObject({ settled: false, stderr: "Error: Model \"nope/x\" not found.\n" });
+    expect(run.leftovers()).toEqual([]);
+  });
+
+  test("a pi that exits silently before replying fails the run with the terminal's screen", async () => {
     const run = launch("x", { script: { exit: 1 } });
     expect(await run.child.exited).toMatchObject({ exitCode: null, settled: false, finalText: "", stderr: "screen line one\nscreen line two" });
     expect(run.calls("read")).toEqual([["terminal", "read", "--terminal=term_child", "--screen", "--json"]]);
@@ -186,6 +206,16 @@ test("the settle rule: every user message is in and the last message is an assis
   expect(settledRun([...turn, message("user"), message("assistant", "stop")], 1)).toEqual({ interruption: undefined });
   expect(settledRun([message("user"), message("assistant", "aborted")], 0)).toEqual({ interruption: "stopped in Orca" });
   expect(settledRun([], 0)).toBeUndefined();
+  const aborted = message("assistant", "aborted");
+  expect(settledRun([message("user"), message("assistant", "toolUse"), aborted], 1)).toEqual({ interruption: "stopped in Orca" });
+  const agent = (status) => ({ type: "custom", customType: "pstack-agents", data: { agent: { id: "a9" }, status } });
+  const notice = (status) => ({ type: "custom_message", customType: "pstack-agent", content: "pstack agent finished.", details: { agentId: "a9", status } });
+  const waiting = [message("user"), message("assistant", "toolUse"), agent("running"), message("toolResult"), message("assistant", "stop")];
+  expect(settledRun(waiting, 0)).toBeUndefined();
+  expect(settledRun([...waiting, agent("completed")], 0)).toEqual({ interruption: undefined });
+  expect(settledRun([...waiting, agent("completed"), notice("completed")], 0)).toBeUndefined();
+  expect(settledRun([...waiting, agent("completed"), notice("completed"), message("assistant", "stop")], 0)).toEqual({ interruption: undefined });
+  expect(settledRun([...waiting, agent("stopped"), notice("stopped")], 0)).toEqual({ interruption: undefined });
   const failed = { type: "message", id: "e1", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "overloaded" } };
   expect(settledRun([message("user"), failed], 0)).toEqual({ interruption: undefined });
   expect(settledRun([message("user"), failed, { type: "context_edit", id: "c1", targetId: "e1", replacement: null }], 0)).toBeUndefined();
@@ -195,6 +225,14 @@ test("an Orca session needs the terminal handle, the CLI wrapper, and the worksp
   const env = { ORCA_TERMINAL_HANDLE: "term_1", ORCA_CLI_COMMAND: "/data/cli/bin/orca", ORCA_WORKTREE_ID: "r::/p" };
   expect(orcaSession(env)).toEqual({ cli: "/data/cli/bin/orca", workspace: "r::/p" });
   for (const name of Object.keys(env)) expect(orcaSession({ ...env, [name]: undefined })).toBeUndefined();
+});
+
+test("the env file leaves out the variables sh holds read-only, so sourcing it never stops the launch", () => {
+  const file = join(scratchDir(), "env");
+  writeFileSync(file, envScript({ UID: "1", EUID: "1", PPID: "1", SHELLOPTS: "x", BASHOPTS: "x", PSTACK_A: "a" }, "ORCA_"));
+  for (const shell of ["sh", "bash"]) {
+    expect(spawnSync(shell, ["-c", '. "$1" && printf %s "$PSTACK_A"', "sh", file], { encoding: "utf8" }).stdout).toBe("a");
+  }
 });
 
 test("the env file drops the variables of the terminal program it is written for", () => {
