@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -10,8 +10,9 @@ import { noticeOf, OUTPUT_CAP_BYTES, statusText, truncateUtf8 } from "./agent-te
 import type { AgentParams } from "./agent-tools.ts";
 import { type Activity, type AgentChild, alive, type ChildExit, PiChild, terminateGroup } from "./child.ts";
 import { HcChild } from "./hc-child.ts";
+import { archivePaseoAgent, archivePaseoAgentDetached, PaseoChild, paseoFate } from "./paseo-child.ts";
 import { loadAgentTypes } from "./agent-files.ts";
-import { activeAgentTag, checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, InvalidValueError, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings, withheldTools } from "./config.ts";
+import { activeAgentTag, checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, HANDOFF_ENV, InvalidValueError, type PstackHandoff, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings, withheldTools } from "./config.ts";
 import { ensureWorktree, planWorktree, settleWorktree, type Worktree, worktreeSchema } from "./worktree.ts";
 
 const ENTRY_TYPE = "pstack-agents";
@@ -39,6 +40,7 @@ const identitySchema = Type.Object({
   systemPromptFile: Type.Optional(Type.String()),
   cwd: Type.String(),
   worktree: Type.Optional(worktreeSchema),
+  paseoAgentId: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9-]*$" })),
   startedAt: Type.String(),
 });
 const runningSchema = Type.Object({
@@ -51,7 +53,7 @@ const runningSchema = Type.Object({
   pidStart: Type.Optional(Type.String()),
   // The pi process that launched it. Only that process may reap it.
   parentPid: Type.Number(),
-  host: Type.Optional(Type.Literal("hc")),
+  host: Type.Optional(Type.Union([Type.Literal("hc"), Type.Literal("paseo")])),
 });
 const endedSchema = Type.Object({
   agent: identitySchema,
@@ -95,6 +97,7 @@ type AgentState = LocalAgent
 // there on every first run of a --session-id).
 function outcomeOf(exit: ChildExit, stopped: boolean): { status: EndedStatus; finalText: string } {
   if (stopped) return { status: "stopped", finalText: exit.finalText || "(stopped before it replied)" };
+  if (exit.interruption) return { status: "stopped", finalText: [exit.finalText, exit.interruption].filter(Boolean).join("\n\n") };
   if (exit.settled && exit.finalText && !exit.errorMessage) return { status: "completed", finalText: exit.finalText };
   const diagnostics = exit.errorMessage || exit.stderr.trim();
   const finalText = exit.finalText && diagnostics ? `${exit.finalText}\n\n${diagnostics}` : exit.finalText || diagnostics || "(no output)";
@@ -116,9 +119,11 @@ function saveOutput(identity: AgentIdentity, text: string): Pick<EndedRecord, "f
 
 // Pi names the file <timestamp>_<session id>.jsonl, reopens it on a resume,
 // and writes it only once the first message is in.
-export function sessionFile({ sessionDir, sessionId }: AgentIdentity): string | undefined {
+export function sessionFile({ sessionDir, sessionId, paseoAgentId }: AgentIdentity): string | undefined {
   try {
-    const name = readdirSync(sessionDir).find((n) => n.endsWith(`_${sessionId}.jsonl`));
+    const names = readdirSync(sessionDir);
+    // Paseo takes no --session-id, so a Paseo agent has a folder to itself. Its session is the oldest there: a pi it starts from bash inherits the folder.
+    const name = paseoAgentId ? names.filter((n) => n.endsWith(".jsonl")).sort()[0] : names.find((n) => n.endsWith(`_${sessionId}.jsonl`));
     return name && join(sessionDir, name);
   } catch {
     return undefined;
@@ -175,6 +180,7 @@ type Fate = "kept" | "orphan" | "unknown" | "gone";
 
 function fateOf(record: RunningRecord): Fate {
   const { pid, pidStart, parentPid } = record;
+  if (record.host === "paseo") return paseoFate(record.agent.paseoAgentId, parentPid);
   if (pid === undefined || !alive(pid)) return "gone";
   const info = inspect(pid);
   if (info && pidStart !== undefined && info.start !== pidStart) return "gone";
@@ -189,6 +195,7 @@ function fateOf(record: RunningRecord): Fate {
 // Stops an orphan, by its group so the bash command it has running goes too.
 // No other fate is signalled: a pid that may have been reused is not ours to hit.
 function reapOrphan(record: RunningRecord, killGraceMs: number): Promise<void> {
+  if (record.agent.paseoAgentId && record.host === "paseo") return archivePaseoAgent(record.agent.paseoAgentId);
   return record.pid === undefined ? Promise.resolve() : terminateGroup(record.pid, () => fateOf(record) === "orphan", killGraceMs);
 }
 
@@ -273,7 +280,8 @@ export class AgentRunner {
     }
     const child = this.spawnChild(identity, prompt);
     const pidStart = child.pid === undefined ? undefined : inspect(child.pid)?.start;
-    const record: RunningRecord = { agent: identity, status: "running", pid: child.pid, pidStart, parentPid: process.pid };
+    const host = identity.paseoAgentId ? "paseo" : undefined;
+    const record: RunningRecord = { agent: identity, status: "running", pid: child.pid, pidStart, parentPid: process.pid, host };
     const run: Run = { child, background, done: child.exited.then((exit) => this.finish(identity, run, exit)) };
     this.agents.set(identity.id, { kind: "local", record, run });
     this.persist(record);
@@ -287,7 +295,12 @@ export class AgentRunner {
     const flags = childArgs(identity, this.settings.depth);
     const env = { [PARENT_SESSION_ENV]: this.ownSessionId };
     // The session's sheet, as for the model: a worktree is a checkout of HEAD and lacks an uncommitted sheet.
-    if (readSheet(this.settings.agentDir, identity.worktree?.repo ?? identity.cwd)?.hcHost && process.env.HC_TERMINAL_ID) {
+    const sheet = readSheet(this.settings.agentDir, identity.worktree?.repo ?? identity.cwd);
+    // An agent that ran stays on its host. Paseo starts a child in its parent's folder, so never one in a worktree.
+    if (identity.paseoAgentId || (!sessionFile(identity) && sheet?.paseoHost && this.settings.paseoAgent && !identity.worktree)) {
+      return this.paseoChild(identity, prompt);
+    }
+    if (sheet?.hcHost && process.env.HC_TERMINAL_ID) {
       // An interactive pi asks whether to trust the project before it reports any status; the parent already decided.
       return new HcChild(identity.id, command, [...base, ...flags, this.projectTrusted ? "--approve" : "--no-approve"], {
         cwd: identity.cwd,
@@ -299,6 +312,45 @@ export class AgentRunner {
       }, prompt);
     }
     return new PiChild(command, [...base, "--mode", "rpc", ...flags], { cwd: identity.cwd, env, exitGraceMs: this.settings.exitGraceMs, onActivity: () => this.showStatus() }, prompt);
+  }
+
+  private paseoChild(identity: AgentIdentity, prompt: string): PaseoChild {
+    const caller = this.settings.paseoAgent;
+    if (!caller) throw new Error(`Agent ${identity.id} is Paseo agent ${identity.paseoAgentId}; message it from a Pi session running as a Paseo agent.`);
+    if (basename(identity.sessionDir) !== identity.id) identity.sessionDir = join(identity.sessionDir, identity.id);
+    mkdirSync(identity.sessionDir, { recursive: true });
+    const handoff: PstackHandoff = {
+      parent: caller,
+      depth: this.settings.depth + 1,
+      subagentType: identity.subagentType,
+      systemPromptFile: identity.systemPromptFile,
+      readonly: identity.readonly,
+      msgDir: identity.sessionDir,
+    };
+    const env = {
+      PI_CODING_AGENT_SESSION_DIR: identity.sessionDir,
+      PI_CODING_AGENT_DIR: this.settings.agentDir,
+      [PARENT_SESSION_ENV]: this.ownSessionId,
+      [HANDOFF_ENV]: JSON.stringify(handoff),
+    };
+    const { paseoAgentId: agentId, description: title, model, thinking, cwd, id } = identity;
+    return new PaseoChild(
+      {
+        caller,
+        dir: identity.sessionDir,
+        target: agentId ? { agentId } : { title, model, thinking, cwd, label: `pstack=${id}`, env },
+        onAgent: (paseoAgentId) => {
+          identity.paseoAgentId = paseoAgentId;
+          this.track(id, { host: "paseo" });
+        },
+        transcript: () => sessionFile(identity),
+      },
+      prompt,
+    );
+  }
+
+  private idlePaseoAgents(): string[] {
+    return [...this.agents.values()].flatMap(({ kind, record }) => (kind === "ended" && record.agent.paseoAgentId ? [record.agent.paseoAgentId] : []));
   }
 
   private track(id: string, handle: Pick<RunningRecord, "host" | "pid" | "pidStart">): void {
@@ -355,7 +407,7 @@ export class AgentRunner {
     // The model that called stop_agent already has the result, so a stop's
     // notice joins the context without starting another turn.
     if (run.background && run.ending !== "teardown") {
-      this.pi.sendMessage(noticeOf(record, sessionFile(identity)), status !== "stopped" ? { triggerTurn: true, deliverAs: "steer" } : { triggerTurn: false });
+      this.pi.sendMessage(noticeOf(record, sessionFile(identity)), run.ending === undefined ? { triggerTurn: true, deliverAs: "steer" } : { triggerTurn: false });
     }
     return record;
   }
@@ -401,7 +453,8 @@ export class AgentRunner {
       throw new Error(`Agent ${state.record.agent.id} is running under another pi process (pid ${state.record.parentPid}); only that process can message or stop it.`);
     }
     if (state.kind === "unverified" || state.kind === "interrupted") {
-      throw new Error(`Agent ${state.record.agent.id}'s previous process (pid ${state.record.pid}) has not exited; it cannot resume or be stopped here until its exit is confirmed.`);
+      const previous = state.record.host === "paseo" ? `Paseo agent ${state.record.agent.paseoAgentId}` : `process (pid ${state.record.pid})`;
+      throw new Error(`Agent ${state.record.agent.id}'s previous ${previous} has not exited; it cannot resume or be stopped here until its exit is confirmed.`);
     }
     return state;
   }
@@ -426,7 +479,11 @@ export class AgentRunner {
 
   async stop(to: string, ending: NonNullable<Run["ending"]> = "stopped"): Promise<EndedRecord> {
     const state = this.owned(to);
-    if (state.kind === "ended") return state.record;
+    if (state.kind === "ended") {
+      const { paseoAgentId } = state.record.agent;
+      if (paseoAgentId) await archivePaseoAgent(paseoAgentId);
+      return state.record;
+    }
     const { run } = state;
     if (run.ending !== "teardown") run.ending = ending;
     run.child.end(this.settings.killGraceMs);
@@ -435,13 +492,15 @@ export class AgentRunner {
 
   async stopAll(): Promise<void> {
     this.closed = true;
-    await Promise.all(this.locals().map((state) => this.stop(state.record.agent.id, "teardown")));
+    const idle = this.idlePaseoAgents().map(archivePaseoAgent);
+    await Promise.all([...idle, ...this.locals().map((state) => this.stop(state.record.agent.id, "teardown"))]);
     this.ui?.setStatus(STATUS_KEY, undefined);
   }
 
   // For an exit that cannot wait: SIGTERM lets each child pi stop its own agents.
   signalAll(): void {
     this.closed = true;
+    this.idlePaseoAgents().forEach(archivePaseoAgentDetached);
     for (const { run } of this.locals()) {
       run.ending = "teardown";
       run.child.signal("SIGTERM");

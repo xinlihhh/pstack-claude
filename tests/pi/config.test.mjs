@@ -53,6 +53,14 @@ test("only an exact pi agent host: hc line moves agents into hc terminals", () =
   }
 });
 
+test("only an exact pi agent host: paseo line runs agents as Paseo agents", () => {
+  expect(parseSheet("bug-fix: opus\r\npi agent host: paseo\r\n").paseoHost).toBe(true);
+  expect(parseSheet("pi agent host: hc\npi agent host: paseo\n")).toMatchObject({ hcHost: true, paseoHost: true });
+  for (const sheet of ["bug-fix: opus\n", "pi agent host: hc\n", "pi agent host: paseo \n", "agent host: paseo\n", "pi agent host: Paseo\n"]) {
+    expect({ sheet, paseo: parseSheet(sheet).paseoHost }).toEqual({ sheet, paseo: false });
+  }
+});
+
 test("an agent file loads as pstack:<name> with its body and model, and an effort is checked against models.json", () => {
   const root = mkdtempSync(join(tmpdir(), "pstack-agents-"));
   try {
