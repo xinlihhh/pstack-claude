@@ -11,6 +11,11 @@ const PARENT_MODEL_ALIASES = ["inherit-parent", "auto"];
 
 // A parent passes it to each agent it starts, so the agent knows its depth.
 export const DEPTH_FLAG = "pstack-depth";
+// Claude Code lets agents nest three layers below the main session and withholds
+// the Agent tool at the third.
+export const MAX_SPAWN_DEPTH = 3;
+// Paseo takes no flags for a child, so what the flags carry reaches it as JSON in this variable.
+export const HANDOFF_ENV = "PSTACK_AGENT";
 // Under agentDir, holds each session's agent sessions and prompts. The worktree
 // audit scans it by this name, so a rename must reach that script too.
 export const PSTACK_STATE_DIR = "pstack";
@@ -26,6 +31,7 @@ export interface Settings {
   pi: { command: string; args: string[] };
   // Layers below the main session: 0 there, 1 in its agents, and so on.
   readonly depth: number;
+  readonly paseoAgent?: string;
   killGraceMs: number;
   // How long a settled child gets to exit after its stdin closes. It covers a
   // nested child's own shutdown, which stops its agents with killGraceMs each.
@@ -45,7 +51,7 @@ function piInvocation(): Settings["pi"] {
 
 // readDepth is called on each use: pi parses extension flags after it loads
 // the extension.
-export function defaultSettings(readDepth: () => number, agentDir = process.env.PI_CODING_AGENT_DIR): Settings {
+export function defaultSettings(readDepth: () => number, agentDir = process.env.PI_CODING_AGENT_DIR, handoff?: PstackHandoff): Settings {
   const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   return {
     pluginRoot,
@@ -53,12 +59,47 @@ export function defaultSettings(readDepth: () => number, agentDir = process.env.
     agentDir: agentDir || join(homedir(), ".pi", "agent"),
     pi: piInvocation(),
     get depth() {
-      return readDepth();
+      return readDepth() || handoff?.depth || 0;
+    },
+    get paseoAgent() {
+      // A session with the depth flag was started by a pstack agent and inherited its Paseo agent id.
+      return readDepth() ? undefined : process.env.PASEO_AGENT_ID;
     },
     killGraceMs: 5000,
     exitGraceMs: 30_000,
   };
 }
+
+const handoffSchema = Type.Object({
+  // The parent's Paseo agent, whose messages the child unwraps.
+  parent: Type.String(),
+  depth: Type.Integer({ minimum: 1 }),
+  subagentType: Type.String(),
+  systemPromptFile: Type.Optional(Type.String()),
+  readonly: Type.Optional(Type.Literal(true)),
+  msgDir: Type.String(),
+});
+export type PstackHandoff = Static<typeof handoffSchema>;
+
+// Takes the variable out of the environment, so no process this one starts reads it as its own.
+export function takeHandoff(env: NodeJS.ProcessEnv): PstackHandoff | undefined {
+  const text = env[HANDOFF_ENV];
+  if (text === undefined) return undefined;
+  delete env[HANDOFF_ENV];
+  const handoff: unknown = JSON.parse(text);
+  if (!Value.Check(handoffSchema, handoff)) throw new Error(`${HANDOFF_ENV} is not a pstack handoff: ${text}`);
+  return handoff;
+}
+
+export const withheldTools = (readonly: true | undefined, depth: number): string[] => [
+  ...(readonly ? ["edit", "write"] : []),
+  ...(depth >= MAX_SPAWN_DEPTH ? ["agent"] : []),
+];
+
+// @gotgenes/pi-permission-system 42.0.0 names a forwarded ask's agent from this tag in the child's
+// system prompt, and picks its per-agent permission policy by that name; without it the parent's
+// dialog says "unknown".
+export const activeAgentTag = (subagentType: string) => `<active_agent name="${subagentType}" />`;
 
 interface Sheet {
   text: string;
@@ -71,6 +112,7 @@ interface Sheet {
   agentToolsOff: boolean;
   hcHost: boolean;
   t3Host: boolean;
+  paseoHost: boolean;
   piModels: Map<string, string>;
 }
 
@@ -92,6 +134,7 @@ export function parseSheet(text: string): Sheet {
     agentToolsOff: lines.some((l) => l === "pi agent tools: off"),
     hcHost: lines.some((l) => l === "pi agent host: hc"),
     t3Host: lines.some((l) => l === "pi agent host: t3"),
+    paseoHost: lines.some((l) => l === "pi agent host: paseo"),
     piModels,
   };
 }

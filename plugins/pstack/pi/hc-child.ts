@@ -168,9 +168,12 @@ export function envScript(env: NodeJS.ProcessEnv): string {
 }
 
 export function replyIn(file: string | undefined, from: number): Pick<ChildExit, "finalText" | "errorMessage"> {
+  return replyOf(file ? jsonLines(readFileSync(file).subarray(from).toString("utf8")) : []);
+}
+
+export function replyOf(entries: unknown[]): Pick<ChildExit, "finalText" | "errorMessage"> {
   const reply = { finalText: "", errorMessage: "" };
-  if (!file) return reply;
-  for (const entry of jsonLines(readFileSync(file).subarray(from).toString("utf8"))) {
+  for (const entry of entries) {
     if (!Value.Check(transcriptReply, entry)) continue;
     const { message } = entry;
     const text = assistantText(message.content);
@@ -208,11 +211,11 @@ function hcError(e: unknown): string {
   return (e as { stderr?: string }).stderr?.trim() || (e as Error).message;
 }
 
-function sizeOf(file: string | undefined): number {
+export function sizeOf(file: string | undefined): number {
   return file ? statSync(file).size : 0;
 }
 
-function jsonLines(text: string): unknown[] {
+export function jsonLines(text: string): unknown[] {
   return text.split("\n").flatMap((line) => {
     try {
       return [JSON.parse(line)];

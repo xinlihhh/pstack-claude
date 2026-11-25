@@ -40,6 +40,8 @@ export interface ChildExit {
   // "" when the run ended cleanly.
   errorMessage: string;
   stderr: string;
+  // Why the run counts as stopped although nothing here stopped it.
+  interruption?: string;
 }
 
 // What a running child is doing, last event wins. It lives only in this
