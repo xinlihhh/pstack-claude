@@ -2,10 +2,11 @@
 import { describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { install } from "../../plugins/pstack/pi/index.ts";
 import { chmodDeniesReads } from "../session-hook-sheets.mjs";
-import { agentBody, agentEntry, fakeCtx, fakePi, flag, gitRepo, listAgents, pluginRoot, recordWith, restore, useWorld, waitFor } from "./harness.mjs";
+import { agentBody, agentEntry, fakeCtx, fakePi, flag, gitRepo, listAgents, pluginRoot, readEntries, recordWith, restore, resultText, useWorld, waitFor } from "./harness.mjs";
 
 const setup = useWorld();
 
@@ -282,5 +283,56 @@ describe("model resolution", () => {
       else process.env.HC_TERMINAL_ID = terminal;
     }
     expect(w.invocations().map((inv) => flag(inv, "--mode"))).toEqual(["rpc"]);
+  });
+});
+
+describe("pi agent host: orca", () => {
+  const VARS = ["PATH", "HC_TERMINAL_ID", "ORCA_TERMINAL_HANDLE", "ORCA_CLI_COMMAND", "ORCA_WORKTREE_ID", "FAKE_ORCA_DIR"];
+  const fakeOrca = fileURLToPath(new URL("./fake-orca.mjs", import.meta.url));
+  const interactivePi = fileURLToPath(new URL("./fake-interactive-pi.mjs", import.meta.url));
+
+  async function inOrca(w, env, fn) {
+    const saved = VARS.map((name) => [name, process.env[name]]);
+    const put = (name, value) => {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    };
+    const orca = { ORCA_TERMINAL_HANDLE: "term_parent", ORCA_CLI_COMMAND: fakeOrca, ORCA_WORKTREE_ID: "repo::/path", FAKE_ORCA_DIR: w.agentDir, HC_TERMINAL_ID: undefined };
+    for (const [name, value] of Object.entries({ ...orca, ...env })) put(name, value);
+    try {
+      return await fn();
+    } finally {
+      for (const [name, value] of saved) put(name, value);
+    }
+  }
+  const orcaCalls = (w) => (existsSync(join(w.agentDir, "calls.jsonl")) ? readEntries(join(w.agentDir, "calls.jsonl")) : []);
+
+  test("an agent runs as an interactive pi in an Orca terminal, and its record names the host and the pid", async () => {
+    const { w, pi, ctx } = setup({ sheet: "pi agent host: orca\n", settings: { pi: { command: interactivePi, args: [] } } });
+    const result = await inOrca(w, {}, () => pi.call("agent", { description: "watch me", prompt: "hello" }, ctx));
+    expect(resultText(result)).toContain("reply to hello");
+    const [child] = readEntries(join(w.agentDir, "pi.jsonl"));
+    expect(child.argv).toContain("--no-approve");
+    expect(child.argv).not.toContain("--mode");
+    expect(orcaCalls(w)[0]).toEqual(expect.arrayContaining(["--worktree=id:repo::/path", "--title=watch me"]));
+    expect(pi.entries.map((e) => [e.data.status, e.data.host, e.data.pid])).toContainEqual(["running", "orca", child.pid]);
+    expect(pi.entries.at(-1).data.status).toBe("completed");
+  });
+
+  test("outside an Orca terminal, the orca line leaves the child on rpc", async () => {
+    const { w, pi, ctx } = setup({ sheet: "pi agent host: orca\n" });
+    await inOrca(w, { ORCA_TERMINAL_HANDLE: undefined }, () => pi.call("agent", { description: "o", prompt: "x" }, ctx));
+    expect(w.invocations().map((inv) => flag(inv, "--mode"))).toEqual(["rpc"]);
+    expect(orcaCalls(w)).toEqual([]);
+  });
+
+  test("with both lines in an hc terminal inside Orca, or the other way round, hc wins", async () => {
+    const { w, pi, ctx } = setup({ sheet: "pi agent host: hc\npi agent host: orca\n" });
+    const bin = join(w.cwd, "..", "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "hc"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await inOrca(w, { PATH: `${bin}:${process.env.PATH}`, HC_TERMINAL_ID: "t-test" }, () => pi.call("agent", { description: "both", prompt: "x" }, ctx));
+    expect(pi.entries[0].data).toMatchObject({ status: "running", host: "hc" });
+    expect(orcaCalls(w)).toEqual([]);
   });
 });

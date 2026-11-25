@@ -10,6 +10,7 @@ import { noticeOf, OUTPUT_CAP_BYTES, statusText, truncateUtf8 } from "./agent-te
 import type { AgentParams } from "./agent-tools.ts";
 import { type Activity, type AgentChild, alive, type ChildExit, PiChild, terminateGroup } from "./child.ts";
 import { HcChild, pidOfTerminal } from "./hc-child.ts";
+import { OrcaChild, orcaSession } from "./orca-child.ts";
 import { cancelOrphan, t3Brief, T3_ENV_REMOVED, T3Child, t3Session, type T3Task } from "./t3-child.ts";
 import { archivePaseoAgent, archivePaseoAgentDetached, PaseoChild, paseoFate } from "./paseo-child.ts";
 import { loadAgentTypes } from "./agent-files.ts";
@@ -55,7 +56,7 @@ const runningSchema = Type.Object({
   pidStart: Type.Optional(Type.String()),
   // The pi process that launched it. Only that process may reap it.
   parentPid: Type.Number(),
-  host: Type.Optional(Type.Union([Type.Literal("hc"), Type.Literal("t3"), Type.Literal("paseo")])),
+  host: Type.Optional(Type.Union([Type.Literal("hc"), Type.Literal("t3"), Type.Literal("paseo"), Type.Literal("orca")])),
   t3TaskId: Type.Optional(Type.String()),
 });
 const endedSchema = Type.Object({
@@ -190,8 +191,8 @@ function fateOf(record: RunningRecord): Fate {
   if (info && pidStart !== undefined && info.start !== pidStart) return "gone";
   // With no word from the system, two live pids keep the record: calling a
   // live agent stopped would let a message start a second process on its session.
-  // An hc terminal's program is a child of herdr-core, not of the pi that launched it.
-  const launcherHasIt = info && record.host !== "hc" ? info.parentPid === parentPid : alive(parentPid);
+  // An hc or Orca terminal's program is a child of herdr-core or of Orca's daemon, not of the pi that launched it.
+  const launcherHasIt = info && record.host === undefined ? info.parentPid === parentPid : alive(parentPid);
   if (parentPid !== process.pid && launcherHasIt) return "kept";
   return info && info.start === pidStart ? "orphan" : "unknown";
 }
@@ -294,7 +295,7 @@ export class AgentRunner {
     }
     const child = this.spawnChild(identity, prompt, !this.agents.has(identity.id));
     const pidStart = child.pid === undefined ? undefined : inspect(child.pid)?.start;
-    const host = child instanceof HcChild ? "hc" : identity.paseoAgentId ? "paseo" : undefined;
+    const host = child instanceof HcChild ? "hc" : child instanceof OrcaChild ? "orca" : identity.paseoAgentId ? "paseo" : undefined;
     const record: RunningRecord = { agent: identity, status: "running", pid: child.pid, pidStart, parentPid: process.pid, host };
     const run: Run = { child, background, done: child.exited.then((exit) => this.finish(identity, run, exit)) };
     this.agents.set(identity.id, { kind: "local", record, run });
@@ -331,6 +332,19 @@ export class AgentRunner {
         cwd: identity.cwd,
         env: { ...env, PI_CODING_AGENT_DIR: this.settings.agentDir },
         envFile: join(identity.sessionDir, `${identity.id}.env`),
+        graceMs: this.settings.killGraceMs,
+        transcript: () => sessionFile(identity),
+        onStart: (pid) => this.track(identity.id, { pid, pidStart: inspect(pid)?.start }),
+      }, prompt);
+    }
+    const orca = sheet?.orcaHost ? orcaSession() : undefined;
+    if (orca) {
+      return new OrcaChild(command, [...base, ...flags, this.projectTrusted ? "--approve" : "--no-approve"], {
+        session: orca,
+        title: identity.description,
+        cwd: identity.cwd,
+        env: { ...env, PI_CODING_AGENT_DIR: this.settings.agentDir },
+        files: join(identity.sessionDir, identity.id),
         graceMs: this.settings.killGraceMs,
         transcript: () => sessionFile(identity),
         onStart: (pid) => this.track(identity.id, { pid, pidStart: inspect(pid)?.start }),

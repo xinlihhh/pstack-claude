@@ -62,7 +62,7 @@ export class HcChild {
     opts: HcOptions,
     prompt: string,
   ) {
-    writeFileSync(opts.envFile, envScript({ ...process.env, ...opts.env }), { mode: 0o600 });
+    writeFileSync(opts.envFile, envScript({ ...process.env, ...opts.env }, "HC_"), { mode: 0o600 });
     const run = ["run", "--json", "--bg", "--no-notify", "--name", name, "--cwd", opts.cwd, "--", "sh", "-c", LOAD_ENV, "pstack-env", opts.envFile, command, ...args];
     this.exited = this.drive(run, opts, prompt);
   }
@@ -160,9 +160,9 @@ export class HcChild {
   }
 }
 
-export function envScript(env: NodeJS.ProcessEnv): string {
+export function envScript(env: NodeJS.ProcessEnv, terminalPrefix: string): string {
   return Object.entries(env)
-    .filter(([name, value]) => value !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !name.startsWith("HC_") && !TERMINAL_VARS.has(name))
+    .filter(([name, value]) => value !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !name.startsWith(terminalPrefix) && !TERMINAL_VARS.has(name))
     .map(([name, value]) => `export ${name}='${(value ?? "").replaceAll("'", "'\\''")}'\n`)
     .join("");
 }
