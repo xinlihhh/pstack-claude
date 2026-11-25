@@ -84,6 +84,7 @@ describe("OrcaChild", () => {
     const [pi] = run.pi();
     expect(run.started).toEqual([pi.pid]);
     expect(pi.cwd).toBe(run.cwd);
+    expect(pi.files).toEqual(["a1.sh"]);
     expect(pi.env).toEqual({ PSTACK_PROBE: "it's $HOME", ORCA_PANE_KEY: "child-pane" });
     expect(alive(pi.pid)).toBe(false);
     expect(run.calls("close")).toEqual([["terminal", "close", "--terminal=term_child", "--json"]]);
@@ -148,6 +149,11 @@ describe("OrcaChild", () => {
     expect(run.leftovers()).toEqual([]);
   });
 
+  test("a failed reply that pi drops to retry does not end the run, and the retried reply does", async () => {
+    const run = launch("x", { script: { retry: true } });
+    expect(await run.child.exited).toMatchObject({ settled: true, finalText: "reply after retry", errorMessage: "" });
+  }, 15_000);
+
   test("an aborted turn is a run stopped in Orca", async () => {
     const run = launch("x", { script: { stopReason: "aborted" } });
     expect(await run.child.exited).toMatchObject({ settled: true, interruption: "stopped in Orca" });
@@ -180,6 +186,9 @@ test("the settle rule: every user message is in and the last message is an assis
   expect(settledRun([...turn, message("user"), message("assistant", "stop")], 1)).toEqual({ interruption: undefined });
   expect(settledRun([message("user"), message("assistant", "aborted")], 0)).toEqual({ interruption: "stopped in Orca" });
   expect(settledRun([], 0)).toBeUndefined();
+  const failed = { type: "message", id: "e1", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "overloaded" } };
+  expect(settledRun([message("user"), failed], 0)).toEqual({ interruption: undefined });
+  expect(settledRun([message("user"), failed, { type: "context_edit", id: "c1", targetId: "e1", replacement: null }], 0)).toBeUndefined();
 });
 
 test("an Orca session needs the terminal handle, the CLI wrapper, and the workspace", () => {

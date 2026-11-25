@@ -18,8 +18,10 @@ const readResult = Type.Object({ result: Type.Object({ terminal: Type.Object({ t
 const failedResult = Type.Object({ error: Type.Object({ message: Type.String() }) });
 const messageEntry = Type.Object({
   type: Type.Literal("message"),
+  id: Type.Optional(Type.String()),
   message: Type.Object({ role: Type.String(), stopReason: Type.Optional(Type.String()) }),
 });
+const droppedEntry = Type.Object({ type: Type.Literal("context_edit"), targetId: Type.String(), replacement: Type.Null() });
 
 export interface OrcaSession {
   cli: string;
@@ -32,12 +34,14 @@ export function orcaSession(env: NodeJS.ProcessEnv = process.env): OrcaSession |
 }
 
 export function settledRun(entries: unknown[], steers: number): Pick<ChildExit, "interruption"> | undefined {
-  const messages = entries.filter((entry) => Value.Check(messageEntry, entry)).map((entry) => entry.message);
+  const messages = entries.filter((entry) => Value.Check(messageEntry, entry));
   const last = messages.at(-1);
   // Counted, not matched by text: a TUI may reshape pasted text.
-  const users = messages.filter((message) => message.role === "user").length;
-  if (users < 1 + steers || last?.role !== "assistant" || last.stopReason === "toolUse") return undefined;
-  return { interruption: last.stopReason === "aborted" ? "stopped in Orca" : undefined };
+  const users = messages.filter(({ message }) => message.role === "user").length;
+  if (users < 1 + steers || last?.message.role !== "assistant" || last.message.stopReason === "toolUse") return undefined;
+  // Pi drops a failed reply it is about to retry with a context edit.
+  if (entries.some((entry) => Value.Check(droppedEntry, entry) && entry.targetId === last.id)) return undefined;
+  return { interruption: last.message.stopReason === "aborted" ? "stopped in Orca" : undefined };
 }
 
 export interface OrcaOptions {
@@ -68,7 +72,7 @@ export class OrcaChild {
     writeFileSync(files.env, envScript({ ...process.env, ...opts.env }, "ORCA_"), { mode: 0o600 });
     // Pi reads an argument that starts with @ as a file, even after --.
     writeFileSync(files.prompt, prompt.startsWith("@") ? ` ${prompt}` : prompt, { mode: 0o600 });
-    const launch = `. ${quote(files.env)} && p=$(cat ${quote(files.prompt)}) && cd ${quote(opts.cwd)} && exec ${[command, ...args].map(quote).join(" ")} -- "$p"\n`;
+    const launch = `. ${quote(files.env)} && rm -- ${quote(files.env)} && p=$(cat ${quote(files.prompt)}) && rm -- ${quote(files.prompt)} && cd ${quote(opts.cwd)} && exec ${[command, ...args].map(quote).join(" ")} -- "$p"\n`;
     writeFileSync(files.script, launch, { mode: 0o600 });
     this.exited = this.drive(files, opts);
   }
@@ -107,9 +111,15 @@ export class OrcaChild {
       opts.onStart(processId);
       if (this.ending) this.stop(opts.graceMs);
       let run: Pick<ChildExit, "interruption"> | undefined;
+      // A settle counts once a second look finds the transcript unchanged: pi writes a failed reply before the edit that drops it for a retry.
+      let seen = -1;
       while (!run && alive(processId)) {
         await sleep(SETTLE_POLL_MS);
-        if (alive(processId)) run = settledRun(written(), this.steers);
+        if (!alive(processId)) break;
+        const entries = written();
+        const ready = settledRun(entries, this.steers);
+        run = ready && entries.length === seen ? ready : undefined;
+        seen = ready ? entries.length : -1;
       }
       this.settled = run !== undefined;
       const entries = written();
