@@ -105,7 +105,7 @@ suite("the orca host on a live Orca runtime", () => {
     const status = join(USER_AGENT_DIR, "extensions", "orca-agent-status.ts");
     if (existsSync(status)) copyFileSync(status, join(agentDir, "extensions", "orca-agent-status.ts"));
     writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ quietStartup: true }));
-    for (const name of Object.keys(process.env)) if (/^(ORCA|PI|T3|HC|PASEO)_/.test(name)) delete process.env[name];
+    for (const name of Object.keys(process.env)) if (/^(ORCA|PI|T3|HC)_/.test(name)) delete process.env[name];
     process.env.PI_TELEMETRY = "0";
 
     spawnSync("git", ["init", "-q", "-b", "main", work]);

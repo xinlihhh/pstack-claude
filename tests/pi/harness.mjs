@@ -45,10 +45,7 @@ export function fakePi() {
   const entries = [];
   // Skills and prompt templates pi lists beside the extension commands: { name, source, sourceInfo: { path, baseDir } }.
   const slashCommands = [];
-  let activeTools = ["read", "bash", "edit", "write", "agent"];
   const api = {
-    getActiveTools: () => [...activeTools],
-    setActiveTools: (names) => (activeTools = [...names]),
     registerTool: (tool) => tools.set(tool.name, tool),
     registerCommand: (name, options) => commands.set(name, options),
     getCommands: () => [...commands.keys()].map((name) => ({ name, source: "extension" })).concat(slashCommands),
