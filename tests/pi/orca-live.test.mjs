@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { sessionFile } from "../../plugins/pstack/pi/agents.ts";
 import { alive } from "../../plugins/pstack/pi/child.ts";
 import { OrcaChild } from "../../plugins/pstack/pi/orca-child.ts";
-import { readEntries } from "./harness.mjs";
+import { readEntries, withEnv } from "./harness.mjs";
 
 const LIVE = process.env.PSTACK_PI_ORCA_LIVE === "1";
 const MODEL = process.env.PSTACK_PI_ORCA_MODEL ?? "magpie/claude/claude-haiku-5-5";
@@ -150,11 +150,11 @@ suite("the orca host on a live Orca runtime", () => {
   test(
     "a run settles on the reply in its transcript, in a tab Orca lists with the agent's title, with the parent's environment off argv and its files removed",
     async () => {
-      process.env.PSTACK_ORCA_PROBE = "orcaprobe42";
-      const { child, identity, started } = launch("Run `wc -l a.txt` and `echo $PSTACK_ORCA_PROBE` with bash, then try the write tool on b.txt. Reply with the line count, the echoed word, and whether write existed.", {
-        args: ["--exclude-tools", "edit,write"],
-      });
-      delete process.env.PSTACK_ORCA_PROBE;
+      const { child, identity, started } = await withEnv({ PSTACK_ORCA_PROBE: "orcaprobe42" }, () =>
+        launch("Run `wc -l a.txt` and `echo $PSTACK_ORCA_PROBE` with bash, then try the write tool on b.txt. Reply with the line count, the echoed word, and whether write existed.", {
+          args: ["--exclude-tools", "edit,write"],
+        }),
+      );
       await until(() => started.pid !== undefined, MINUTE);
       expect(readFileSync(`/proc/${started.pid}/cmdline`, "utf8")).not.toContain("orcaprobe42");
       expect(await until(() => orca("agent", "list").agents.some((a) => a.title === `pstack live ${identity.id}`), MINUTE)).toBe(true);
