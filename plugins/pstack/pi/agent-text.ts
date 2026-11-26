@@ -8,7 +8,6 @@ import type { AgentRecord, EndedRecord } from "./agents.ts";
 import type { Activity } from "./child.ts";
 
 export const NOTICE_TYPE = "pstack-agent";
-// The session entry type an agent's record is saved under.
 export const AGENTS_ENTRY = "pstack-agents";
 export const OUTPUT_CAP_BYTES = 50 * 1024;
 

@@ -1,9 +1,4 @@
-// The orca host against a real Orca runtime and a real model. Skipped unless
-// PSTACK_PI_ORCA_LIVE=1. It starts an `orca-ide serve` of its own, with a
-// throwaway HOME and ORCA_USER_DATA_PATH on 127.0.0.1, and at the end stops only
-// the processes whose environment names that data path, so the user's Orca is
-// never touched. Never run a bare `orca` here: on Linux it is a screen reader.
-// PSTACK_PI_ORCA_MODEL picks the model; ORCA_IDE the server CLI.
+// Never run a bare `orca` here: on Linux it is a screen reader.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// Stands in for an interactive pi: it writes Pi-shaped session lines and stays alive after its reply.
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -31,13 +30,13 @@ if (script.hang) {
   const inbox = join(dir, "inbox.jsonl");
   while (!existsSync(inbox)) await sleep(20);
   write("assistant", "before the steer", { stopReason: "stop" });
-  // Longer than the parent's poll, so a settle rule that ignores the steer would end the run on the reply above.
+  // Longer than two of the parent's polls, so a settle rule that ignores the steer would end the run on the reply above.
   await sleep(1200);
   const steer = JSON.parse(readFileSync(inbox, "utf8").split("\n")[0]);
   write("user", steer);
   write("assistant", `steered: ${steer}`, { stopReason: "stop" });
 } else if (script.retry) {
-  // Pi writes a failed reply, later a context edit that drops it, then asks again. Five gaps shorter than the parent's poll, so one of its polls falls in a gap.
+  // Five gaps shorter than the parent's poll, so one of its polls falls in a gap.
   for (let attempt = 1; attempt <= 5; attempt++) {
     write("assistant", "", { stopReason: "error", errorMessage: "overloaded" }, `e${attempt}`);
     await sleep(450);

@@ -121,7 +121,7 @@ export class OrcaChild {
       opts.onStart(processId);
       if (this.ending) this.stop(opts.graceMs);
       let run: Pick<ChildExit, "interruption"> | undefined;
-      // A settle counts once a second look finds the transcript unchanged: pi writes a failed reply before the edit that drops it for a retry.
+      // Pi writes a failed reply before the context edit that drops it for a retry.
       let seen = -1;
       while (!run && alive(processId)) {
         await sleep(SETTLE_POLL_MS);

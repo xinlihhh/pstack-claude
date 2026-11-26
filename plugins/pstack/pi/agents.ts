@@ -196,7 +196,6 @@ interface HostPolicy {
 
 // A process host's run is the process the record names by pid and start time. An
 // hc record written before its pid takes both from hc, in identifyByTerminalName.
-// launcherHolds says whether the live launching pi still holds that process.
 function processPolicy(launcherHolds: (processParentPid: number, launcherPid: number) => boolean): HostPolicy {
   const fate = ({ pid, pidStart, parentPid }: RunningRecord): Fate => {
     if (pid === undefined || !alive(pid)) return "gone";

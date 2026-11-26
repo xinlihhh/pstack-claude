@@ -1,4 +1,3 @@
-// `pi agent host: orca`: OrcaChild against a fake Orca CLI that runs a fake interactive pi.
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";

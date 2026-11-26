@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Stands in for the Orca CLI. `terminal create` runs its --command as Orca does: in a session of its own, with the terminal's environment and not the caller's.
+// `terminal create` runs its --command as Orca does: in a session of its own, with the terminal's environment and not the caller's.
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
