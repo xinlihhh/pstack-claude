@@ -10,6 +10,7 @@ import { AGENTS_ENTRY, noticeOf, OUTPUT_CAP_BYTES, statusText, truncateUtf8 } fr
 import type { AgentParams } from "./agent-tools.ts";
 import { type Activity, type AgentChild, alive, type ChildExit, type Fate, PiChild, terminateGroup } from "./child.ts";
 import { HcChild, pidOfTerminal } from "./hc-child.ts";
+import { OrcaChild, orcaSession } from "./orca-child.ts";
 import { t3Brief, T3_ENV_REMOVED, T3Child, t3Host, t3Session, type T3Task } from "./t3-child.ts";
 import { loadAgentTypes } from "./agent-files.ts";
 import { checkEffort, DEPTH_FLAG, GENERAL_PURPOSE, InvalidValueError, PSTACK_STATE_DIR, readSheet, resolveModel, type Settings } from "./config.ts";
@@ -26,7 +27,7 @@ const PARENT_SESSION_ENV = "PI_SUBAGENT_PARENT_SESSION";
 const endedStatus = Type.Union([Type.Literal("completed"), Type.Literal("failed"), Type.Literal("stopped")]);
 type EndedStatus = Static<typeof endedStatus>;
 // Absent on a record an earlier version wrote; such an agent runs as an RPC child.
-const hostSchema = Type.Union([Type.Literal("rpc"), Type.Literal("hc"), Type.Literal("t3")]);
+const hostSchema = Type.Union([Type.Literal("rpc"), Type.Literal("hc"), Type.Literal("t3"), Type.Literal("orca")]);
 type Host = Static<typeof hostSchema>;
 
 // Fixed when the agent starts and reused by every launch of it, so a resume
@@ -106,6 +107,7 @@ type AgentState = LocalAgent
 // there on every first run of a --session-id).
 function outcomeOf(exit: ChildExit, stopped: boolean): { status: EndedStatus; finalText: string } {
   if (stopped) return { status: "stopped", finalText: exit.finalText || "(stopped before it replied)" };
+  if (exit.interruption) return { status: "stopped", finalText: [exit.finalText, exit.interruption].filter(Boolean).join("\n\n") };
   if (exit.settled && exit.finalText && !exit.errorMessage) return { status: "completed", finalText: exit.finalText };
   const diagnostics = exit.errorMessage || exit.stderr.trim();
   const finalText = exit.finalText && diagnostics ? `${exit.finalText}\n\n${diagnostics}` : exit.finalText || diagnostics || "(no output)";
@@ -219,9 +221,9 @@ function processPolicy(launcherHolds: (processParentPid: number, launcherPid: nu
 }
 
 const processHost = processPolicy((processParentPid, launcherPid) => processParentPid === launcherPid);
-// A terminal's program is a child of its terminal server, such as herdr-core, not of the pi that launched it.
+// A terminal's program is a child of its terminal server (herdr-core, Orca), not of the pi that launched it.
 const terminalHost = processPolicy((_, launcherPid) => alive(launcherPid));
-const hosts: Record<Host, HostPolicy> = { rpc: processHost, hc: terminalHost, t3: t3Host };
+const hosts: Record<Host, HostPolicy> = { rpc: processHost, hc: terminalHost, orca: terminalHost, t3: t3Host };
 const hostOf = (record: RunningRecord): HostPolicy => hosts[record.host ?? "rpc"];
 
 const now = () => new Date().toISOString();
@@ -275,7 +277,10 @@ export class AgentRunner {
     // cannot remove a thread's tools, so a read-only agent and one at the depth limit stay local, where
     // --exclude-tools enforces them.
     const t3 = sheet?.t3Host && t3Session() && !worktree && !params.readonly && this.settings.depth + 1 < MAX_SPAWN_DEPTH;
-    const host: Host = t3 ? "t3" : sheet?.hcHost && process.env.HC_TERMINAL_ID ? "hc" : "rpc";
+    const host: Host = t3 ? "t3"
+      : sheet?.hcHost && process.env.HC_TERMINAL_ID ? "hc"
+      : sheet?.orcaHost && orcaSession() ? "orca"
+      : "rpc";
     const identity: AgentIdentity = {
       id,
       description: params.description,
@@ -338,10 +343,11 @@ export class AgentRunner {
       const launch = { title: identity.description, model: identity.model, thinking: identity.thinking, threadId: identity.t3ThreadId, onStart };
       return { child: new T3Child(t3, launch, identity.t3ThreadId ? prompt : t3Brief(identity, prompt)), host };
     }
-    // An hc agent's session is a Pi session file, so outside herdr-core an RPC child resumes it.
+    // An interactive pi asks whether to trust the project before it reports any status; the parent already decided.
+    const interactiveArgs = [...base, ...flags, this.projectTrusted ? "--approve" : "--no-approve"];
+    // A terminal agent's session is a Pi session file, so outside herdr-core or Orca an RPC child resumes it.
     if (host === "hc" && process.env.HC_TERMINAL_ID) {
-      // An interactive pi asks whether to trust the project before it reports any status; the parent already decided.
-      const child = new HcChild(identity.id, command, [...base, ...flags, this.projectTrusted ? "--approve" : "--no-approve"], {
+      const child = new HcChild(identity.id, command, interactiveArgs, {
         cwd: identity.cwd,
         env: { ...env, PI_CODING_AGENT_DIR: this.settings.agentDir },
         envFile: join(identity.sessionDir, `${identity.id}.env`),
@@ -350,6 +356,20 @@ export class AgentRunner {
         onStart: (pid) => this.track(identity.id, { pid, pidStart: inspect(pid)?.start }),
       }, prompt);
       return { child, host };
+    }
+    const orca = host === "orca" ? orcaSession() : undefined;
+    if (orca) {
+      const child = new OrcaChild(command, interactiveArgs, {
+        session: orca,
+        title: identity.description,
+        cwd: identity.cwd,
+        env: { ...env, PI_CODING_AGENT_DIR: this.settings.agentDir },
+        files: join(identity.sessionDir, identity.id),
+        graceMs: this.settings.killGraceMs,
+        transcript: () => sessionFile(identity),
+        onStart: (pid) => this.track(identity.id, { pid, pidStart: inspect(pid)?.start }),
+      }, prompt);
+      return { child, host: "orca" };
     }
     const child = new PiChild(command, [...base, "--mode", "rpc", ...flags], { cwd: identity.cwd, env, exitGraceMs: this.settings.exitGraceMs, onActivity: () => this.showStatus() }, prompt);
     return { child, host: "rpc" };
@@ -409,7 +429,7 @@ export class AgentRunner {
     // The model that called stop_agent already has the result, so a stop's
     // notice joins the context without starting another turn.
     if (run.background && run.ending !== "teardown") {
-      this.pi.sendMessage(noticeOf(record, sessionFile(identity)), status !== "stopped" ? { triggerTurn: true, deliverAs: "steer" } : { triggerTurn: false });
+      this.pi.sendMessage(noticeOf(record, sessionFile(identity)), run.ending === undefined ? { triggerTurn: true, deliverAs: "steer" } : { triggerTurn: false });
     }
     return record;
   }
